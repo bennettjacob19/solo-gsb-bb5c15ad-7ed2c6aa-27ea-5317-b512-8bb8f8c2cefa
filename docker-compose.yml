@@ -1,0 +1,18 @@
+services:
+  dna-restriction-api:
+    build: .
+    image: dna-restriction-api:latest
+    container_name: dna-restriction-api
+    ports:
+      - "${HOST_PORT:-8000}:8000"
+    environment:
+      # 容器内监听地址/端口（一般无需修改；改宿主端口用 HOST_PORT）
+      HOST: "0.0.0.0"
+      PORT: "8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request,sys; sys.exit(0 if json.load(urllib.request.urlopen('http://127.0.0.1:8000/health'))['status']=='ok' else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
