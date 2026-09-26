@@ -13,6 +13,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 
+# 构建期初始化自检：确认应用模块可导入、/digest 与 /design-panel 均已注册
+RUN python -c "from app.main import app; \
+paths = sorted(getattr(r, 'path', None) for r in app.routes); \
+assert '/digest' in paths and '/design-panel' in paths, paths; \
+print('init check ok:', paths)"
+
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \

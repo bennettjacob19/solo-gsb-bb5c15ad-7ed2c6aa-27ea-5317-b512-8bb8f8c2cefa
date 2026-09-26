@@ -8,13 +8,16 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
+from .design import run_design_panel
 from .digest import DigestError, run_digest
 
 app = FastAPI(
     title="DNA 限制酶切模拟 API",
     description=(
         "输入仅含 A/C/G/T 的序列、线性/环状拓扑与若干酶的识别序列和切点偏移，"
-        "按切点返回原链顺序的片段。同时搜索正向识别序列与其反向互补序列。"
+        "按切点返回原链顺序的片段。同时搜索正向识别序列与其反向互补序列。\n\n"
+        "`POST /design-panel`：对 2..8 个样本与 1..10 个候选酶做联合酶切，"
+        "搜索能相互鉴别全部样本对的最少酶组合。"
     ),
     version="1.0.0",
 )
@@ -48,6 +51,21 @@ async def digest(request: Request) -> dict[str, Any]:
     except Exception:
         raise DigestError("请求体必须是合法的 JSON 对象")
     return run_digest(payload)
+
+
+@app.post(
+    "/design-panel",
+    summary="为多个 DNA 样本寻找可相互鉴别的最少酶组合",
+    responses={
+        400: {"description": "样本数量/名称/长度、候选酶、容差或拓扑非法"},
+    },
+)
+async def design_panel(request: Request) -> dict[str, Any]:
+    try:
+        payload = await request.json()
+    except Exception:
+        raise DigestError("请求体必须是合法的 JSON 对象")
+    return run_design_panel(payload)
 
 
 if __name__ == "__main__":
