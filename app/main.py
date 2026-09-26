@@ -8,7 +8,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
-from .digest import DigestError, run_digest
+from .digest import DigestError, run_design_panel, run_digest
 
 app = FastAPI(
     title="DNA 限制酶切模拟 API",
@@ -48,6 +48,21 @@ async def digest(request: Request) -> dict[str, Any]:
     except Exception:
         raise DigestError("请求体必须是合法的 JSON 对象")
     return run_digest(payload)
+
+
+@app.post(
+    "/design-panel",
+    summary="为多个 DNA 样本寻找可相互鉴别的最少酶组合",
+    responses={
+        400: {"description": "样本/酶/拓扑/容差非法，或线性序列切点越界"},
+    },
+)
+async def design_panel(request: Request) -> dict[str, Any]:
+    try:
+        payload = await request.json()
+    except Exception:
+        raise DigestError("请求体必须是合法的 JSON 对象")
+    return run_design_panel(payload)
 
 
 if __name__ == "__main__":

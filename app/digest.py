@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import itertools
 from typing import Any
 
 _BASES = "ACGT"
 _TOPOLOGIES = ("linear", "circular")
+
+_PANEL_MIN_SAMPLES = 2
+_PANEL_MAX_SAMPLES = 8
+_PANEL_MAX_SEQUENCE_LENGTH = 2000
+_PANEL_MIN_ENZYMES = 1
+_PANEL_MAX_ENZYMES = 10
 
 
 class DigestError(ValueError):
@@ -254,4 +261,157 @@ def run_digest(payload: Any) -> dict:
         "cuts": sorted(cuts),
         "fragments": fragments,
         "enzyme_hits": hits,
+    }
+
+
+# ---------------------------------------------------------------------------
+# /design-panel：为多个 DNA 样本寻找能相互鉴别的最少酶组合
+# ---------------------------------------------------------------------------
+
+
+def _validate_samples(raw: Any) -> list[dict]:
+    if raw is None:
+        raise DigestError("缺少 samples 字段")
+    if not isinstance(raw, list):
+        raise DigestError("samples 必须是数组")
+    if not (_PANEL_MIN_SAMPLES <= len(raw) <= _PANEL_MAX_SAMPLES):
+        raise DigestError(
+            f"samples 数量必须在 {_PANEL_MIN_SAMPLES}..{_PANEL_MAX_SAMPLES} 之间，"
+            f"当前为 {len(raw)}"
+        )
+
+    samples: list[dict] = []
+    seen_names: set[str] = set()
+    for i, item in enumerate(raw):
+        label = f"第 {i + 1} 个样本"
+        if not isinstance(item, dict):
+            raise DigestError(f"{label} 必须是对象")
+
+        name = item.get("name")
+        if not isinstance(name, str):
+            raise DigestError(f"{label} 的 name 必须是字符串")
+        name = name.strip()
+        if not name:
+            raise DigestError(f"{label} 的 name 不能为空（或仅含空白字符）")
+        if name in seen_names:
+            raise DigestError(f"样本名称重复：{name!r}；样本名称必须唯一")
+        seen_names.add(name)
+
+        seq = _validate_sequence(item.get("sequence"))
+        if len(seq) > _PANEL_MAX_SEQUENCE_LENGTH:
+            raise DigestError(
+                f"样本 {name!r} 的序列长度为 {len(seq)}，"
+                f"超过上限 {_PANEL_MAX_SEQUENCE_LENGTH} 碱基"
+            )
+        samples.append({"name": name, "sequence": seq})
+    return samples
+
+
+def _validate_tolerance(raw: Any) -> int:
+    if not _is_real_int(raw):
+        raise DigestError("tolerance 必须是非负整数")
+    if raw < 0:
+        raise DigestError("tolerance 必须是非负整数（不能为负数）")
+    return raw
+
+
+def _length_profile(seq: str, cuts: set[int], topology: str) -> list[int]:
+    """联合酶切后的片段长度谱：全部片段长度升序排列，重复长度保留。"""
+    n = len(seq)
+    if topology == "linear":
+        inner = sorted(c for c in cuts if 0 < c < n)
+        bounds = [0, *inner, n]
+        return sorted(b - a for a, b in zip(bounds, bounds[1:]))
+
+    # 环状切点均已对 n 取模
+    points = sorted(cuts)
+    if not points:
+        return [n]
+    profile = sorted((b - a) % n or n for a, b in zip(points, [*points[1:], points[0]]))
+    return profile
+
+
+def _indistinguishable(profile_a: list[int], profile_b: list[int], tolerance: int) -> bool:
+    """两谱片段数相同且对应（升序后）长度差均不超过容差时视为不可区分。"""
+    if len(profile_a) != len(profile_b):
+        return False
+    return all(abs(a - b) <= tolerance for a, b in zip(profile_a, profile_b))
+
+
+def run_design_panel(payload: Any) -> dict:
+    """校验请求体并搜索最少鉴别酶组合，返回可直接 JSON 序列化的响应字典。"""
+    if not isinstance(payload, dict):
+        raise DigestError("请求体必须是 JSON 对象")
+
+    samples = _validate_samples(payload.get("samples"))
+    topology = _validate_topology(payload.get("topology"))
+    enzymes = _validate_enzymes(payload.get("enzymes"))
+    if not (_PANEL_MIN_ENZYMES <= len(enzymes) <= _PANEL_MAX_ENZYMES):
+        raise DigestError(
+            f"候选酶数量必须在 {_PANEL_MIN_ENZYMES}..{_PANEL_MAX_ENZYMES} 之间，"
+            f"当前为 {len(enzymes)}"
+        )
+    tolerance = _validate_tolerance(payload.get("tolerance"))
+
+    sequences = [s["sequence"] for s in samples]
+
+    # 对“每个样本 × 每个候选酶”做一次单酶酶切并缓存切点。
+    # 任意酶组合的联合酶切等价于各酶切点集合的并（切点位置只依赖序列与酶，
+    # 与是否与其他酶同时切无关），因此枚举组合时只需合并切点集合；
+    # 这是对联合酶切结果的直接计算，而非合并单酶的鉴别结论。
+    cut_table: list[list[set[int]]] = []
+    for seq in sequences:
+        row: list[set[int]] = []
+        for enzyme in enzymes:
+            cuts, _hits = _find_cuts(seq, [enzyme], topology)
+            row.append(set(cuts))
+        cut_table.append(row)
+
+    # 按酶数最少、候选酶输入下标列表字典序最小枚举所有非空组合。
+    # 每个组合独立判断：必须同时区分所有样本对（不能只合并各单酶的鉴别结论）。
+    m = len(enzymes)
+    sample_pairs = list(itertools.combinations(range(len(samples)), 2))
+    indices: list[int] | None = None
+    for size in range(1, m + 1):
+        for combo in itertools.combinations(range(m), size):
+            profiles = [
+                _length_profile(
+                    sequences[j],
+                    set().union(*(cut_table[j][e] for e in combo)),
+                    topology,
+                )
+                for j in range(len(samples))
+            ]
+            if all(
+                not _indistinguishable(
+                    profiles[a], profiles[b], tolerance
+                )
+                for a, b in sample_pairs
+            ):
+                indices = list(combo)
+                break
+        if indices is not None:
+            break
+
+    if indices is None:
+        return {"status": "no_solution"}
+
+    selected_profiles = []
+    for j, sample in enumerate(samples):
+        cuts: set[int] = set().union(*(cut_table[j][e] for e in indices))
+        profile = _length_profile(sequences[j], cuts, topology)
+        selected_profiles.append(
+            {
+                "name": sample["name"],
+                "length": len(sequences[j]),
+                "fragment_count": len(profile),
+                "fragment_lengths": profile,
+            }
+        )
+
+    return {
+        "status": "solution",
+        "enzyme_indices": indices,
+        "enzyme_count": len(indices),
+        "profiles": selected_profiles,
     }

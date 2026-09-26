@@ -3,6 +3,8 @@ services:
     build: .
     image: dna-restriction-api:latest
     container_name: dna-restriction-api
+    # init: 以轻量 init 进程托管 uvicorn，确保容器停止时信号正确转发、快速回收
+    init: true
     ports:
       - "${HOST_PORT:-8000}:8000"
     environment:
